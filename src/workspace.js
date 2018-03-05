@@ -1,5 +1,3 @@
-'use babel'
-
 const _ = require('underscore-plus')
 const url = require('url')
 const path = require('path')
@@ -310,7 +308,10 @@ module.exports = class Workspace extends Model {
     this.originalFontSize = null
     this.openers = []
     this.destroyedItemURIs = []
-    this.element = null
+    if (this.element) {
+      this.element.destroy()
+      this.element = null
+    }
     this.consumeServices(this.packageManager)
   }
 
@@ -494,10 +495,12 @@ module.exports = class Workspace extends Model {
       if (item instanceof TextEditor) {
         const subscriptions = new CompositeDisposable(
           this.textEditorRegistry.add(item),
-          this.textEditorRegistry.maintainGrammar(item),
           this.textEditorRegistry.maintainConfig(item),
           item.observeGrammar(this.handleGrammarUsed.bind(this))
         )
+        if (!this.project.findBufferForId(item.buffer.id)) {
+          this.project.addBuffer(item.buffer)
+        }
         item.onDidDestroy(() => { subscriptions.dispose() })
         this.emitter.emit('did-add-text-editor', {textEditor: item, pane, index})
       }
@@ -612,7 +615,7 @@ module.exports = class Workspace extends Model {
   // editors in the workspace.
   //
   // * `callback` {Function} to be called with current and future text editors.
-  //   * `editor` An {TextEditor} that is present in {::getTextEditors} at the time
+  //   * `editor` A {TextEditor} that is present in {::getTextEditors} at the time
   //     of subscription or that is added at some later time.
   //
   // Returns a {Disposable} on which `.dispose()` can be called to unsubscribe.
@@ -659,7 +662,7 @@ module.exports = class Workspace extends Model {
   // changing or closing tabs and ensures critical UI feedback, like changing the
   // highlighted tab, gets priority over work that can be done asynchronously.
   //
-  // * `callback` {Function} to be called when the active pane item stopts
+  // * `callback` {Function} to be called when the active pane item stops
   //   changing.
   //   * `item` The active pane item.
   //
@@ -820,7 +823,8 @@ module.exports = class Workspace extends Model {
   // Extended: Invoke the given callback when a pane item is about to be
   // destroyed, before the user is prompted to save it.
   //
-  // * `callback` {Function} to be called before pane items are destroyed.
+  // * `callback` {Function} to be called before pane items are destroyed. If this function returns
+  //   a {Promise}, then the item will not be destroyed until the promise resolves.
   //   * `event` {Object} with the following keys:
   //     * `item` The item to be destroyed.
   //     * `pane` {Pane} containing the item to be destroyed.
@@ -1049,10 +1053,10 @@ module.exports = class Workspace extends Model {
 
   // Essential: Search the workspace for items matching the given URI and hide them.
   //
-  // * `itemOrURI` (optional) The item to hide or a {String} containing the URI
+  // * `itemOrURI` The item to hide or a {String} containing the URI
   //   of the item to hide.
   //
-  // Returns a {boolean} indicating whether any items were found (and hidden).
+  // Returns a {Boolean} indicating whether any items were found (and hidden).
   hide (itemOrURI) {
     let foundItems = false
 
@@ -1157,16 +1161,17 @@ module.exports = class Workspace extends Model {
   // * `uri` A {String} containing a URI.
   //
   // Returns a {Promise} that resolves to the {TextEditor} (or other item) for the given URI.
-  createItemForURI (uri, options) {
+  async createItemForURI (uri, options) {
     if (uri != null) {
-      for (let opener of this.getOpeners()) {
+      for (const opener of this.getOpeners()) {
         const item = opener(uri, options)
-        if (item != null) return Promise.resolve(item)
+        if (item != null) return item
       }
     }
 
     try {
-      return this.openTextFile(uri, options)
+      const item = await this.openTextFile(uri, options)
+      return item
     } catch (error) {
       switch (error.code) {
         case 'CANCELLED':
@@ -1196,7 +1201,7 @@ module.exports = class Workspace extends Model {
     }
   }
 
-  openTextFile (uri, options) {
+  async openTextFile (uri, options) {
     const filePath = this.project.resolvePath(uri)
 
     if (filePath != null) {
@@ -1212,24 +1217,37 @@ module.exports = class Workspace extends Model {
 
     const fileSize = fs.getSizeSync(filePath)
 
-    const largeFileMode = fileSize >= (2 * 1048576) // 2MB
-    if (fileSize >= (this.config.get('core.warnOnLargeFileLimit') * 1048576)) { // 20MB by default
-      const choice = this.applicationDelegate.confirm({
+    let [resolveConfirmFileOpenPromise, rejectConfirmFileOpenPromise] = []
+    const confirmFileOpenPromise = new Promise((resolve, reject) => {
+      resolveConfirmFileOpenPromise = resolve
+      rejectConfirmFileOpenPromise = reject
+    })
+
+    if (fileSize >= (this.config.get('core.warnOnLargeFileLimit') * 1048576)) { // 40MB by default
+      this.applicationDelegate.confirm({
         message: 'Atom will be unresponsive during the loading of very large files.',
-        detailedMessage: 'Do you still want to load this file?',
+        detail: 'Do you still want to load this file?',
         buttons: ['Proceed', 'Cancel']
+      }, response => {
+        if (response === 1) {
+          rejectConfirmFileOpenPromise()
+        } else {
+          resolveConfirmFileOpenPromise()
+        }
       })
-      if (choice === 1) {
-        const error = new Error()
-        error.code = 'CANCELLED'
-        throw error
-      }
+    } else {
+      resolveConfirmFileOpenPromise()
     }
 
-    return this.project.bufferForPath(filePath, options)
-      .then(buffer => {
-        return this.textEditorRegistry.build(Object.assign({buffer, largeFileMode, autoHeight: false}, options))
-      })
+    try {
+      await confirmFileOpenPromise
+      const buffer = await this.project.bufferForPath(filePath, options)
+      return this.textEditorRegistry.build(Object.assign({buffer, autoHeight: false}, options))
+    } catch (e) {
+      const error = new Error()
+      error.code = 'CANCELLED'
+      throw error
+    }
   }
 
   handleGrammarUsed (grammar) {
@@ -1249,11 +1267,8 @@ module.exports = class Workspace extends Model {
   // Returns a {TextEditor}.
   buildTextEditor (params) {
     const editor = this.textEditorRegistry.build(params)
-    const subscriptions = new CompositeDisposable(
-      this.textEditorRegistry.maintainGrammar(editor),
-      this.textEditorRegistry.maintainConfig(editor)
-    )
-    editor.onDidDestroy(() => { subscriptions.dispose() })
+    const subscription = this.textEditorRegistry.maintainConfig(editor)
+    editor.onDidDestroy(() => subscription.dispose())
     return editor
   }
 
@@ -1556,6 +1571,7 @@ module.exports = class Workspace extends Model {
     if (this.activeItemSubscriptions != null) {
       this.activeItemSubscriptions.dispose()
     }
+    if (this.element) this.element.destroy()
   }
 
   /*
@@ -1752,6 +1768,11 @@ module.exports = class Workspace extends Model {
   //     (default: true)
   //   * `priority` (optional) {Number} Determines stacking order. Lower priority items are
   //     forced closer to the edges of the window. (default: 100)
+  //   * `autoFocus` (optional) {Boolean} true if you want modal focus managed for you by Atom.
+  //     Atom will automatically focus your modal panel's first tabbable element when the modal
+  //     opens and will restore the previously selected element when the modal closes. Atom will
+  //     also automatically restrict user tab focus within your modal while it is open.
+  //     (default: false)
   //
   // Returns a {Panel}
   addModalPanel (options = {}) {
@@ -1950,6 +1971,7 @@ module.exports = class Workspace extends Model {
 
       if (!outOfProcessFinished.length) {
         let flags = 'g'
+        if (regex.multiline) { flags += 'm' }
         if (regex.ignoreCase) { flags += 'i' }
 
         const task = Task.once(
@@ -1983,25 +2005,22 @@ module.exports = class Workspace extends Model {
 
   checkoutHeadRevision (editor) {
     if (editor.getPath()) {
-      const checkoutHead = () => {
-        return this.project.repositoryForDirectory(new Directory(editor.getDirectoryPath()))
-          .then(repository => repository && repository.checkoutHeadForEditor(editor))
+      const checkoutHead = async () => {
+        const repository = await this.project.repositoryForDirectory(new Directory(editor.getDirectoryPath()))
+        if (repository) repository.checkoutHeadForEditor(editor)
       }
 
       if (this.config.get('editor.confirmCheckoutHeadRevision')) {
         this.applicationDelegate.confirm({
           message: 'Confirm Checkout HEAD Revision',
-          detailedMessage: `Are you sure you want to discard all changes to "${editor.getFileName()}" since the last Git commit?`,
-          buttons: {
-            OK: checkoutHead,
-            Cancel: null
-          }
+          detail: `Are you sure you want to discard all changes to "${editor.getFileName()}" since the last Git commit?`,
+          buttons: ['OK', 'Cancel']
+        }, response => {
+          if (response === 0) checkoutHead()
         })
       } else {
-        return checkoutHead()
+        checkoutHead()
       }
-    } else {
-      return Promise.resolve(false)
     }
   }
 }

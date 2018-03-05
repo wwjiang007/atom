@@ -119,7 +119,7 @@ module.exports = class Dock {
     this.setState({visible: false})
   }
 
-  // Extended: Toggle the dock's visiblity without changing the {Workspace}'s
+  // Extended: Toggle the dock's visibility without changing the {Workspace}'s
   // active pane container.
   toggle () {
     const state = {visible: !this.state.visible}
@@ -143,7 +143,7 @@ module.exports = class Dock {
     // frame to ensure the property is animated (or not) appropriately, however we luck out in this
     // case because the drag start always happens before the item is dragged into the toggle button.
     if (nextState.visible !== prevState.visible) {
-      // Never animate toggling visiblity...
+      // Never animate toggling visibility...
       nextState.shouldAnimate = false
     } else if (!nextState.visible && nextState.draggingItem && !prevState.draggingItem) {
       // ...but do animate if you start dragging while the panel is hidden.
@@ -327,12 +327,15 @@ module.exports = class Dock {
     // Include all panels that are closer to the edge than the dock in our calculations.
     switch (this.location) {
       case 'right':
+        if (!this.isVisible()) bounds.left = bounds.right - 2
         bounds.right = Number.POSITIVE_INFINITY
         break
       case 'bottom':
+        if (!this.isVisible()) bounds.top = bounds.bottom - 1
         bounds.bottom = Number.POSITIVE_INFINITY
         break
       case 'left':
+        if (!this.isVisible()) bounds.right = bounds.left + 2
         bounds.left = Number.NEGATIVE_INFINITY
         break
     }
