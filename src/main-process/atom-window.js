@@ -51,15 +51,16 @@ class AtomWindow extends EventEmitter {
     // taskbar's icon. See https://github.com/atom/atom/issues/4811 for more.
     if (process.platform === 'linux') options.icon = ICON_PATH
     if (this.shouldAddCustomTitleBar()) options.titleBarStyle = 'hidden'
-    if (this.shouldAddCustomInsetTitleBar()) options.titleBarStyle = 'hidden-inset'
+    if (this.shouldAddCustomInsetTitleBar()) options.titleBarStyle = 'hiddenInset'
     if (this.shouldHideTitleBar()) options.frame = false
     this.browserWindow = new BrowserWindow(options)
 
     Object.defineProperty(this.browserWindow, 'loadSettingsJSON', {
       get: () => JSON.stringify(Object.assign({
-        userSettings: this.atomApplication.configFile.get()
-      }, this.loadSettings)),
-      configurable: true
+        userSettings: !this.isSpec
+          ? this.atomApplication.configFile.get()
+          : null
+      }, this.loadSettings))
     })
 
     this.handleEvents()
